@@ -1,0 +1,7 @@
+build/
+original/
+*.obb
+*.apk
+/*.so
+*.i64
+__pycache__/
