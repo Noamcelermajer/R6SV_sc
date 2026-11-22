@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <pthread.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -125,8 +126,16 @@ static void read_render_width(struct android_app *app) {
     fclose(f);
 }
 
-/* ---- immersive mode: hide the system bars (a JNI call into the activity; failures are only logged) ------- */
+/* ---- immersive mode: hide the system bars (a JNI call into the activity; failures are only logged) -------
+ * Runs on a short-lived helper thread: the main loop runs on a switched stack (android_main), and ART on Android 17
+ * aborts in AttachCurrentThread when the stack pointer is outside the thread's own stack (thread.cc "FindStackTop"). */
+static void hide_system_ui_on_thread(struct android_app *app);
+static void *hide_system_ui_thread(void *app) { hide_system_ui_on_thread(app); return NULL; }
 static void hide_system_ui(struct android_app *app) {
+    pthread_t t;
+    if (!pthread_create(&t, NULL, hide_system_ui_thread, app)) pthread_join(t, NULL);
+}
+static void hide_system_ui_on_thread(struct android_app *app) {
     JavaVM *vm = app->activity->vm;
     JNIEnv *env = NULL;
     if ((*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK || !env) return;

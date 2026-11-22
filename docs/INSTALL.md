@@ -4,8 +4,10 @@ APK: `build/android/r6sv-recomp.apk` (14,688,726 bytes, package `com.r6sv.recomp
 newer, OpenGL ES 2.0, debug-signed). It contains no game data: the 765 MB data folder is pushed separately.
 Tested on the Android emulator (Android 14 x86_64 image, arm64 through the image's ARM translation, AVD `r6test`): it
 boots, loads the ERS Training mission, renders it and the look-drag works. On a real phone (Galaxy Z Fold7, Android 17)
-it has so far crashed at game address 0x2200000 right after `Application::Init`, in runs that also logged "game data is
-missing": see "Folder ownership" below. Not yet re-tested there with correctly owned data.
+it also runs into the training mission and takes touch input. Two things had stopped it there: data folders owned by
+`shell` (crash at game address 0x2200000 after `Application::Init`, with "game data is missing" logged: see "Folder
+ownership" below), and ART aborting in `AttachCurrentThread` (`thread.cc` "FindStackTop" check) because the system-bar
+JNI call ran on the game's switched stack; that call now runs on a helper thread.
 
 ## Folder ownership (read before pushing data)
 
