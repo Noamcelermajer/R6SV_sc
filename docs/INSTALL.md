@@ -2,8 +2,20 @@
 
 APK: `build/android/r6sv-recomp.apk` (14,688,726 bytes, package `com.r6sv.recomp`, arm64-v8a only, Android 8.0 / API 26 or
 newer, OpenGL ES 2.0, debug-signed). It contains no game data: the 765 MB data folder is pushed separately.
-**This build has never been run on a phone or emulator** (none was available). The Windows host runner (same translated
-code and runtime) reaches the menus and an in-game mission. Treat the first run as a test.
+Tested on the Android emulator (Android 14 x86_64 image, arm64 through the image's ARM translation, AVD `r6test`): it
+boots, loads the ERS Training mission, renders it and the look-drag works. On a real phone (Galaxy Z Fold7, Android 17)
+it has so far crashed at game address 0x2200000 right after `Application::Init`, in runs that also logged "game data is
+missing": see "Folder ownership" below. Not yet re-tested there with correctly owned data.
+
+## Folder ownership (read before pushing data)
+
+The app must own its data folder and everything in it. Folders created by `adb shell mkdir` or `adb push` belong to
+`shell` with mode `drwxrws---`, and the app cannot enter them, so the game finds no data. Do not create the folder
+yourself: install, start the app once so Android creates `/sdcard/Android/data/com.r6sv.recomp/files`, close it, then
+copy. What worked on the emulator (root available): push one tar to `/data/local/tmp`, `adb root`, unpack it in
+`/data/media/0/Android/data/com.r6sv.recomp/files`, then `chown -R <app uid>:ext_data_rw` that folder. Without root
+(a phone): push, then copy the pushed subfolders as the app with
+`adb shell run-as com.r6sv.recomp cp -r <files>/data <files>/data_app`, remove the pushed `data` and rename the copy.
 
 ## Build (if you need a fresh APK)
 

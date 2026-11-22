@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -193,6 +194,7 @@ static void boot(struct android_app *app) {
     struct stat st;
     char probe[600];
     snprintf(probe, sizeof probe, "%s/data/Res.array", data);
+    if (stat(probe, &st)) rt_log("stat %s: %s", probe, strerror(errno));
     if (stat(probe, &st)) rt_log("game data is missing: copy the content of GloftR6HP to %s (adb push GloftR6HP/. %s/)", data, data);
     rt_frontend_paths(data, home);
     rt_game_boot(data, data, home, temp, width, height);
