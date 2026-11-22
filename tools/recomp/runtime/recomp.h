@@ -1,4 +1,4 @@
-/* Runtime for code translated from ARM32 by tools/recomp/lift.py.
+/* Runtime for code translated from ARM32 (Thumb-2 and ARM mode) by tools/recomp/lift.py.
  *
  * Game memory is a byte array `m`; a game address is an offset into it. CPU state the translated
  * functions share lives in `cpu_t`. Build with -fwrapv -fno-strict-aliasing -ffp-contract=off.
@@ -9,6 +9,7 @@
 #define RECOMP_H
 
 #include <math.h>
+#include <setjmp.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -77,8 +78,12 @@ enum {
 /* Leave after a tail call: the callee already left the final state (including r15) in c. */
 #define RC_TAIL() do { c->depth--; return; } while (0)
 
-/* Generated with the translated functions: call the function at a game address, or an import by slot. */
+/* Generated with the translated functions: call the function at a game address, or an import by slot. The dispatcher
+ * names functions by their link address without the Thumb bit; translated code reaches it through RC_DISPATCH, which
+ * clears bit 0 (a Thumb function pointer, or the target of bx/blx, carries it; return addresses in lr do too and are
+ * never dispatched). The generated dispatcher may also accept the odd form itself. */
 void rc_dispatch(struct cpu *c, uint8_t *m, uint32_t target);
+#define RC_DISPATCH(c, m, t) rc_dispatch((c), (m), (t) & ~1u)
 void rc_import(struct cpu *c, uint8_t *m, uint32_t slot);
 void rc_hostcall(struct cpu *c, uint8_t *m, uint32_t slot); /* runtime functions called through a game address */
 
@@ -137,6 +142,19 @@ static inline uint32_t addc(uint32_t a, uint32_t b, uint32_t cin, uint32_t *co, 
     return r;
 }
 
+/* setjmp. A translated function that calls setjmp (through the PLT) must be resumable by a later longjmp from deeper C
+ * frames, so the host setjmp runs in that function's own C frame. Contract with the runtime (runtime/libc.c):
+ *  - the lifter emits `r14 = <return address>; r12 = <got slot>; RC_SAVE(); RC_SETJMP();` for a call to setjmp, _setjmp,
+ *    sigsetjmp or __sigsetjmp, with r0 = the guest jmp_buf; execution continues with the next instruction;
+ *  - rt_setjmp_prepare(c, guest_jmp_buf) (runtime) saves r4-r11, sp, lr, d8-d15 from c into the guest buffer, records
+ *    c->depth and returns the host jmp_buf kept for that guest address; RC_SETJMP runs setjmp on it;
+ *  - the first return makes r0 = 0; a later longjmp (runtime) fills c (r0 = value, r4-r11, sp, lr, d8-d15, r15 = lr),
+ *    restores c->depth and host-longjmps here: the second return reloads every register local and the flags from c. */
+void *rt_setjmp_prepare(struct cpu *c, uint32_t guest_jmp_buf);
+#define RC_SETJMP() do { \
+        if (setjmp(*(jmp_buf *)rt_setjmp_prepare(c, c->r[0])) == 0) { r0 = 0; } else { RC_LOAD(); } \
+    } while (0)
+
 /* Linux kernel user helpers at 0xffff0fxx. Returns 0 when `a` is not one. */
 static inline int rc_kuser(cpu_t *c, uint8_t *m, uint32_t a) {
     switch (a) {
@@ -162,8 +180,58 @@ static inline int rc_kuser(cpu_t *c, uint8_t *m, uint32_t a) {
     return 1;
 }
 
+/* Exclusive stores (ldrex/strex family) with single-threaded semantics but a real atomic compare-exchange: the
+ * translated function keeps the monitor in two locals (address `exa`, the value `exv` that ldrex read) and strex
+ * stores only if the address matches and the memory still holds that value. Returns the strex status (0 = stored). */
+#define RC_STREX(bits) \
+    static inline uint32_t rc_strex##bits(cpu_t *c, uint8_t *m, uint32_t ea, uint32_t exa, uint##bits##_t exv, \
+                                          uint##bits##_t val) { \
+        if (ea != exa) return 1; \
+        if (!RC_OK(c, ea, bits / 8) || (ea & (bits / 8 - 1))) { c->fault = RC_FAULT_MEMORY; return 1; } \
+        uint##bits##_t e = exv; \
+        return !__atomic_compare_exchange_n((uint##bits##_t *)(m + ea), &e, val, 0, __ATOMIC_SEQ_CST, \
+                                            __ATOMIC_SEQ_CST); \
+    }
+RC_STREX(8)
+RC_STREX(16)
+RC_STREX(32)
+RC_STREX(64)
+
 static inline uint32_t ror32(uint32_t x, unsigned n) { n &= 31; return n ? (x >> n) | (x << (32 - n)) : x; }
 static inline uint32_t clz32(uint32_t x) { return x ? (uint32_t)__builtin_clz(x) : 32; }
+static inline uint32_t rev32(uint32_t x) { return __builtin_bswap32(x); }
+static inline uint32_t rev16(uint32_t x) { return ((x & 0xff00ff00u) >> 8) | ((x & 0x00ff00ffu) << 8); }
+static inline uint32_t revsh(uint32_t x) { return (uint32_t)(int32_t)(int16_t)(((x & 0xffu) << 8) | ((x >> 8) & 0xffu)); }
+static inline uint32_t rbit32(uint32_t x) {
+    x = ((x >> 1) & 0x55555555u) | ((x & 0x55555555u) << 1);
+    x = ((x >> 2) & 0x33333333u) | ((x & 0x33333333u) << 2);
+    x = ((x >> 4) & 0x0f0f0f0fu) | ((x & 0x0f0f0f0fu) << 4);
+    return __builtin_bswap32(x);
+}
+/* udiv/sdiv as the ARMv7-A core does them: division by zero gives 0, INT_MIN / -1 gives INT_MIN */
+static inline uint32_t udiv32(uint32_t a, uint32_t b) { return b ? a / b : 0; }
+static inline uint32_t sdiv32(uint32_t a, uint32_t b) {
+    if (b == 0) return 0;
+    if ((int32_t)a == INT32_MIN && (int32_t)b == -1) return a;
+    return (uint32_t)((int32_t)a / (int32_t)b);
+}
+/* Saturation. The Q flag is not modelled. */
+static inline uint32_t rc_ssat(int32_t x, unsigned bits) {
+    int64_t hi = (1ll << (bits - 1)) - 1, lo = -(1ll << (bits - 1));
+    return (uint32_t)(int32_t)(x > hi ? hi : x < lo ? lo : x);
+}
+static inline uint32_t rc_usat(int32_t x, unsigned bits) {
+    int64_t hi = (1ll << bits) - 1;
+    return (uint32_t)(x < 0 ? 0 : x > hi ? hi : x);
+}
+static inline uint32_t rc_qadd(uint32_t a, uint32_t b) {
+    int64_t s = (int64_t)(int32_t)a + (int32_t)b;
+    return (uint32_t)(int32_t)(s > INT32_MAX ? INT32_MAX : s < INT32_MIN ? INT32_MIN : s);
+}
+static inline uint32_t rc_qsub(uint32_t a, uint32_t b) {
+    int64_t s = (int64_t)(int32_t)a - (int32_t)b;
+    return (uint32_t)(int32_t)(s > INT32_MAX ? INT32_MAX : s < INT32_MIN ? INT32_MIN : s);
+}
 
 /* VFP. Comparisons give the FPSCR NZCV nibble, conversions saturate like the hardware. */
 static inline uint32_t fcmp(double a, double b) {

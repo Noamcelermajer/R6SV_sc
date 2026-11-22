@@ -75,17 +75,21 @@ static uint64_t now_ms(void) { struct timeval tv; gettimeofday(&tv, NULL); retur
 /* ---- game address -> host object ------------------------------------------------------------------- */
 enum { K_MUTEX = 1, K_COND, K_SEM };
 #define OBJ_SLOTS 65536
+#define OBJ_TOMB 0xFFFFFFFFu /* a destroyed object's slot: skipped by lookups, reused by inserts */
 static struct { uint32_t addr; int kind; void *obj; } objs[OBJ_SLOTS];
 static volatile int objs_lock;
 
 static void *obj_get(uint32_t addr, int kind, uint32_t init) {
     uint32_t h = (addr >> 2) * 2654435761u;
     void *found = NULL;
+    int64_t tomb = -1;
     while (__atomic_exchange_n(&objs_lock, 1, __ATOMIC_ACQUIRE)) { }
     for (uint32_t k = 0; k < OBJ_SLOTS; k++) {
         uint32_t i = (h + k) & (OBJ_SLOTS - 1);
         if (objs[i].addr == addr && objs[i].kind == kind) { found = objs[i].obj; break; }
+        if (objs[i].addr == OBJ_TOMB && tomb < 0) tomb = i;
         if (!objs[i].addr) {
+            if (tomb >= 0) i = (uint32_t)tomb;
             if (kind == K_MUTEX) { found = malloc(sizeof(hmutex)); hm_init(found); }
             else if (kind == K_COND) { found = malloc(sizeof(hcond)); hc_init(found); }
             else { found = malloc(sizeof(hsem)); hs_init(found, init); }
@@ -98,19 +102,44 @@ static void *obj_get(uint32_t addr, int kind, uint32_t init) {
     return found;
 }
 
+/* pthread_mutex_destroy and friends: release the host object so the slot (and the game address, which the game
+ * may reuse for something else) starts clean */
+static void obj_destroy(uint32_t addr, int kind) {
+    uint32_t h = (addr >> 2) * 2654435761u;
+    while (__atomic_exchange_n(&objs_lock, 1, __ATOMIC_ACQUIRE)) { }
+    for (uint32_t k = 0; k < OBJ_SLOTS; k++) {
+        uint32_t i = (h + k) & (OBJ_SLOTS - 1);
+        if (!objs[i].addr) break;
+        if (objs[i].addr == addr && objs[i].kind == kind) {
+#ifdef _WIN32
+            if (kind == K_MUTEX) DeleteCriticalSection(objs[i].obj);
+            else if (kind == K_SEM) CloseHandle(*(hsem *)objs[i].obj);
+#else
+            if (kind == K_MUTEX) pthread_mutex_destroy(objs[i].obj);
+            else if (kind == K_COND) pthread_cond_destroy(objs[i].obj);
+            else sem_destroy(objs[i].obj);
+#endif
+            free(objs[i].obj);
+            objs[i].addr = OBJ_TOMB; objs[i].kind = 0; objs[i].obj = NULL;
+            break;
+        }
+    }
+    __atomic_store_n(&objs_lock, 0, __ATOMIC_RELEASE);
+}
+
 /* ---- mutexes (always recursive on the host: a non-recursive relock would deadlock on the device too) -- */
 IMP(pthread_mutexattr_init) { rt_st32(A(0), 0); RET(0); }
 IMP(pthread_mutexattr_settype) { rt_st32(A(0), A(1)); RET(0); }
 IMP(pthread_mutexattr_destroy) { RET(0); }
 IMP(pthread_mutex_init) { rt_st32(A(0), A(1) && rt_ld32(A(1)) == 1 ? 0x4000u : 0); obj_get(A(0), K_MUTEX, 0); RET(0); }
-IMP(pthread_mutex_destroy) { RET(0); }
+IMP(pthread_mutex_destroy) { obj_destroy(A(0), K_MUTEX); RET(0); }
 IMP(pthread_mutex_lock) { hm_lock(obj_get(A(0), K_MUTEX, 0)); RET(0); }
 IMP(pthread_mutex_trylock) { RET(hm_trylock(obj_get(A(0), K_MUTEX, 0))); }
 IMP(pthread_mutex_unlock) { hm_unlock(obj_get(A(0), K_MUTEX, 0)); RET(0); }
 
 /* ---- condition variables ---------------------------------------------------------------------------- */
 IMP(pthread_cond_init) { obj_get(A(0), K_COND, 0); RET(0); }
-IMP(pthread_cond_destroy) { RET(0); }
+IMP(pthread_cond_destroy) { obj_destroy(A(0), K_COND); RET(0); }
 IMP(pthread_cond_signal) { hc_signal(obj_get(A(0), K_COND, 0)); RET(0); }
 IMP(pthread_cond_broadcast) { hc_broadcast(obj_get(A(0), K_COND, 0)); RET(0); }
 IMP(pthread_cond_wait) { hc_wait(obj_get(A(0), K_COND, 0), obj_get(A(1), K_MUTEX, 0)); RET(0); }
@@ -131,7 +160,7 @@ IMP(pthread_cond_timedwait) {
 
 /* ---- semaphores --------------------------------------------------------------------------------------- */
 IMP(sem_init) { obj_get(A(0), K_SEM, A(2)); RET(0); }
-IMP(sem_destroy) { RET(0); }
+IMP(sem_destroy) { obj_destroy(A(0), K_SEM); RET(0); }
 IMP(sem_post) { hs_post(obj_get(A(0), K_SEM, 0)); RET(0); }
 IMP(sem_wait) { hs_wait(obj_get(A(0), K_SEM, 0)); RET(0); }
 IMP(sem_trywait) { RET(hs_trywait(obj_get(A(0), K_SEM, 0))); }
@@ -199,10 +228,13 @@ IMP(pthread_create) {
     rt_st32(A(0), t->id);
     if (rt_verbose) rt_log("pthread_create: thread %u at %#x", t->id, t->start);
 #ifdef _WIN32
-    t->h = CreateThread(NULL, 1 << 20, thread_main, t, 0, NULL);
+    t->h = CreateThread(NULL, 8u << 20, thread_main, t, 0, NULL); /* translated code recurses on the host stack */
     RET(t->h ? 0 : 11);
 #else
-    RET(pthread_create(&t->h, NULL, thread_main, t) ? 11 : 0);
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 8u << 20);
+    RET(pthread_create(&t->h, &attr, thread_main, t) ? 11 : 0);
 #endif
 }
 static gthread *find_thread(uint32_t id) { for (int k = 0; k < MAX_THREADS; k++) if (threads[k] && threads[k]->id == id) return threads[k]; return NULL; }
@@ -224,7 +256,12 @@ IMP(pthread_exit) {
 }
 IMP(pthread_self) { RET(self ? self->id : 1); }
 IMP(pthread_equal) { RET(A(0) == A(1)); }
-IMP(pthread_kill) { RET(0); }
+IMP(pthread_kill) { /* signals are recorded, not delivered (libc.c); signal 0 only checks that the thread exists */
+    if (A(0) != 1 && !find_thread(A(0))) { RET(3); return; } /* ESRCH */
+    if (A(1)) rt_signal_note((int)A(1), A(0));
+    RET(0);
+}
+IMP(pthread_detach) { RET(0); }
 IMP(pthread_attr_init) { memset(G(A(0)), 0, 24); RET(0); }
 IMP(pthread_attr_destroy) { RET(0); }
 IMP(pthread_attr_setdetachstate) { RET(0); }
@@ -248,6 +285,6 @@ void rt_pthread_register(void) {
     REG(sem_destroy); REG(sem_post); REG(sem_wait); REG(sem_trywait); REG(pthread_key_create);
     REG(pthread_key_delete); REG(pthread_getspecific); REG(pthread_setspecific); REG(pthread_once);
     REG(pthread_create); REG(pthread_join); REG(pthread_exit); REG(pthread_self); REG(pthread_equal);
-    REG(pthread_kill); REG(pthread_attr_init); REG(pthread_attr_destroy); REG(pthread_attr_setdetachstate);
+    REG(pthread_kill); REG(pthread_detach); REG(pthread_attr_init); REG(pthread_attr_destroy); REG(pthread_attr_setdetachstate);
     REG(pthread_attr_setstacksize); REG(sched_yield);
 }

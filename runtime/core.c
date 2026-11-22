@@ -98,6 +98,7 @@ uint32_t rt_call(cpu_t *c, uint32_t fn, int nargs, ...) {
     cpu_t saved = *c;
     uint32_t words[16];
     va_list ap;
+    fn &= ~1u; /* FRONTENDS: a Thumb function pointer has bit 0 set; the dispatcher names functions without it */
     va_start(ap, nargs);
     for (int k = 0; k < nargs && k < 16; k++) words[k] = va_arg(ap, uint32_t);
     va_end(ap);

@@ -5,3 +5,4 @@ original/
 /*.so
 *.i64
 __pycache__/
+temp/

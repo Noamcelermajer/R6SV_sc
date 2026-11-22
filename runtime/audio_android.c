@@ -1,5 +1,5 @@
-/* Android audio backend: an AAudio output stream whose data callback pulls from the OpenSL player.
- * The pull only copies from the player's queue, so it is safe in AAudio's real-time callback. */
+/* Android audio backend: an AAudio output stream whose data callback pulls from the media ring (media.c).
+ * The pull only copies from the ring, so it is safe in AAudio's real-time callback. */
 #include <aaudio/AAudio.h>
 #include <stdlib.h>
 #include <string.h>

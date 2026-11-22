@@ -498,3 +498,49 @@ int rt_vscan(const char *in, const char *fmt, rt_args *a) {
     }
     return count;
 }
+
+/* ---- wide formatting (swprintf) ------------------------------------------------------------------
+ * The wide format (UTF-32 in game memory) is converted to UTF-8 and run through rt_vformat, whose %s, %ls, %c
+ * and %lc already print UTF-8; the result is converted back to UTF-32. Width and precision therefore count
+ * bytes, not characters, for non-ASCII text (identical for ASCII). A byte that is not valid UTF-8 (a narrow %s
+ * argument holding Latin-1) becomes the code point of the same value. */
+static uint32_t utf8_dec(const uint8_t *s, size_t n, int *used) {
+    uint8_t b = s[0];
+    int need = (b >= 0xC2 && b < 0xE0) ? 1 : (b >= 0xE0 && b < 0xF0) ? 2 : (b >= 0xF0 && b < 0xF5) ? 3 : 0;
+    if (!need || (size_t)need >= n) { *used = 1; return b; }
+    uint32_t cp = b & (0x3Fu >> need);
+    for (int k = 1; k <= need; k++) {
+        if ((s[k] & 0xC0) != 0x80) { *used = 1; return b; }
+        cp = (cp << 6) | (s[k] & 0x3Fu);
+    }
+    *used = need + 1;
+    return cp;
+}
+
+/* Returns the number of characters swprintf would produce; writes at most cap-1 characters and a terminator.
+ * (The caller turns a result >= cap into -1, as swprintf does.) */
+int rt_vformat_w(uint32_t dst, uint32_t cap, uint32_t wfmt, rt_args *a) {
+    size_t fl = 0, k = 0;
+    while (rt_ld32(wfmt + 4 * (uint32_t)fl)) fl++;
+    char *fmt = malloc(fl * 4 + 1);
+    if (!fmt) return -1;
+    for (uint32_t i = 0; i < fl; i++) k += (size_t)utf8_enc(rt_ld32(wfmt + 4 * i), fmt + k);
+    fmt[k] = 0;
+    rt_args first = *a;
+    int n = rt_vformat(NULL, 0, fmt, a);
+    char *buf = malloc((size_t)n + 1);
+    if (!buf) { free(fmt); return -1; }
+    rt_vformat(buf, (size_t)n + 1, fmt, &first);
+    free(fmt);
+    uint32_t chars = 0;
+    for (size_t i = 0; i < (size_t)n;) {
+        int used;
+        uint32_t cp = utf8_dec((const uint8_t *)buf + i, (size_t)n - i, &used);
+        i += (size_t)used;
+        if (cap && chars + 1 < cap) rt_st32(dst + 4 * chars, cp);
+        chars++;
+    }
+    if (cap) rt_st32(dst + 4 * (chars < cap ? chars : cap - 1), 0);
+    free(buf);
+    return (int)chars;
+}

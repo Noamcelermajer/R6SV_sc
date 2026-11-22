@@ -1,7 +1,8 @@
-/* Windows audio backend: waveOut with four blocks in flight, refilled by a thread that pulls from the OpenSL player.
- * NOVA_AUDIO_WAV=<file> also records the stream into a WAV file (for checking audio without listening). */
+/* Windows audio backend: waveOut with four blocks in flight, refilled by a thread that pulls from the media ring (media.c).
+ * Recording to a WAV file (NOVA_AUDIO_WAV) is done in media.c. */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <windows.h>
 #include <mmsystem.h>
 
@@ -19,32 +20,11 @@ typedef struct stream {
     rt_audio_pull pull;
     void *user;
     volatile int running, quit;
-    FILE *wav;
-    uint32_t wav_bytes;
 } stream;
-
-static void wav_header(stream *s) {
-    uint32_t rate = (uint32_t)s->rate, ch = (uint32_t)s->channels, byte_rate = rate * ch * 2, size = s->wav_bytes;
-    uint8_t h[44] = {'R', 'I', 'F', 'F'};
-    uint32_t riff = 36 + size, fmt_len = 16, data_len = size;
-    uint16_t pcm = 1, ch16 = (uint16_t)ch, align = (uint16_t)(ch * 2), bits = 16;
-    memcpy(h + 4, &riff, 4); memcpy(h + 8, "WAVEfmt ", 8); memcpy(h + 16, &fmt_len, 4); memcpy(h + 20, &pcm, 2);
-    memcpy(h + 22, &ch16, 2); memcpy(h + 24, &rate, 4); memcpy(h + 28, &byte_rate, 4); memcpy(h + 32, &align, 2);
-    memcpy(h + 34, &bits, 2); memcpy(h + 36, "data", 4); memcpy(h + 40, &data_len, 4);
-    fseek(s->wav, 0, SEEK_SET);
-    fwrite(h, 1, 44, s->wav);
-    fseek(s->wav, 0, SEEK_END);
-    fflush(s->wav);
-}
 
 static void fill(stream *s, int k) {
     if (s->running) s->pull(s->user, s->buf[k], FRAMES);
     else memset(s->buf[k], 0, (size_t)FRAMES * s->channels * 2);
-    if (s->wav && s->running) {
-        fwrite(s->buf[k], 2, (size_t)FRAMES * s->channels, s->wav);
-        s->wav_bytes += (uint32_t)(FRAMES * s->channels * 2);
-        if ((s->wav_bytes / (FRAMES * s->channels * 2)) % 64 == 0) wav_header(s);
-    }
     waveOutWrite(s->wo, &s->hdr[k], sizeof(WAVEHDR));
 }
 
@@ -79,8 +59,6 @@ void *rt_audio_open(int rate, int channels, rt_audio_pull pull, void *user) {
         s->hdr[k].dwBufferLength = (DWORD)(FRAMES * channels * 2);
         waveOutPrepareHeader(s->wo, &s->hdr[k], sizeof(WAVEHDR));
     }
-    const char *wav = getenv("NOVA_AUDIO_WAV");
-    if (wav && (s->wav = fopen(wav, "wb"))) wav_header(s);
     s->thread = CreateThread(NULL, 0, feeder, s, 0, NULL);
     return s;
 }
@@ -96,5 +74,5 @@ void rt_audio_close(void *p) {
     waveOutReset(s->wo);
     for (int k = 0; k < BLOCKS; k++) waveOutUnprepareHeader(s->wo, &s->hdr[k], sizeof(WAVEHDR));
     waveOutClose(s->wo);
-    if (s->wav) { wav_header(s); fclose(s->wav); }
+    free(s);
 }

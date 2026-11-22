@@ -138,4 +138,27 @@ double rt_args_double(rt_args *a);
 int rt_vformat(char *out, size_t cap, const char *fmt, rt_args *a); /* returns the full length, like snprintf */
 int rt_vscan(const char *in, const char *fmt, rt_args *a);
 
+/* ---- libc stream (libc.c, net.c, wchar.c, printf.c): see docs/notes/libc.md ------------------------------ */
+void rt_libc_set_data_dir(const char *dir);        /* host folder the game's /sdcard/gameloft/games/GloftR6HP maps to */
+void rt_libc_add_data_prefix(const char *prefix);  /* one more guest path prefix that maps to the data folder */
+int rt_map_path(const char *guest_path, char *out, size_t cap); /* aliases + data folder + case-insensitive fallback; 1 if the result exists */
+void *rt_setjmp_prepare(cpu_t *c, uint32_t guest_jmp_buf); /* a host jmp_buf*: the lifter's setjmp macro, see libc.md */
+void rt_signal_note(int sig, uint32_t target);     /* records a raise/pthread_kill */
+int rt_vformat_w(uint32_t dst, uint32_t cap, uint32_t wfmt, rt_args *a); /* swprintf: wide format and output */
+
+/* ---- JNI / game layer (jni.c, game.c): see docs/notes/jni.md ------------------------------------------------ */
+uint32_t rt_jni_object(const char *cls);           /* a java.lang.Object handle of the given class (slash form) */
+void rt_jni_set_locale(const char *tag);           /* "en", "fr", "de_DE", "zh-TW", ...: Game.GetPhoneLanguage and the nativeStart language; default env R6SV_LANG or "en" */
+int rt_jni_game_language(void);                    /* the language index Game.d passes to nativeStart */
+void rt_jni_set_device(const char *manufacturer, const char *model); /* lower-case Build.MANUFACTURER / MODEL (default "google" / "pixel") */
+void rt_jni_set_igli(const void *data, uint32_t size); /* res/raw/igli.bin (262,144 bytes) for Game.db(); else files, see notes/jni.md */
+void rt_game_accel(float x, float y, float z);     /* Game.nativeAccelerometer (the game ignores it) */
+void rt_game_key(int keycode, int down);           /* Android key codes: Game.nativeSetOnKeyDown/Up (24, 25, 27 are filtered as in Java) */
+void rt_game_restart_gl(int width, int height);    /* the GL context was recreated: GameRenderer.nativeStart again */
+int rt_game_exit_requested(void);                  /* Game.Exit() was called */
+/* host services behind Game.openBrowser / sendAppToBackground / Exit: weak defaults in jni.c (log, log, exit(0)) */
+void rt_host_open_url(const char *url);
+void rt_host_background(void);
+void rt_host_exit(void);
+
 #endif
