@@ -79,8 +79,23 @@ Known and expected:
 - Immersive (hidden navigation bar) mode is attempted through JNI from the native thread, which Android may refuse (logged
   as "hiding the system bars failed"). The window is full screen regardless.
 - Back key: passed to the game, as the original Java did; `Game.Exit()` finishes the activity. Volume keys stay with Android.
-- Pause (home, screen off) calls the game's pause; returning recreates the EGL surface and resumes. Not tested on a device.
-- Drag, fire and movement controls in a mission were not tested even on the runner.
+- Pause (home, screen off) calls the game's pause; returning recreates the EGL surface and shows the pause menu.
+  Tested on the emulator (home and back, screen off and on, then resume and play).
+
+## Emulator test record (2026-11-22)
+
+Android 14 emulator (AVD `r6test`), release APK, each mission from a fresh start on Recruit: briefing, loading screen,
+intro cutscene (skipped), then a short walk and a few shots.
+
+- All 12 missions load and play: Training, 1 Steel Wind, 2 Cold Thunder, 3 Angel Wire, 4, 5 Blue Sky, 6, 7 Razor Ice,
+  8, 9, 10 Wild Arrow, 11 Mystic Tiger. Missions 2-11 were opened by setting the unlock bytes in `SaveGame.bin`
+  (file offset 0x54 + level index, one byte each, up to 0x63), not by finishing the previous one.
+- Pause menu, Options (Sounds, Controls), Help, home and return, screen off and on: work.
+- Not covered: finishing a mission (end-of-mission screens, the save written by real progress), checkpoints reloaded
+  after death, multiplayer, sound output (the emulator ran with `-no-audio`; the AAudio stream opens).
+- One process death in mission 10 during the first pass, with no crash line logged; a second run of the same
+  mission with the same inputs did not repeat it. Unexplained.
+- Level loading takes 45-75 s on the emulator (software ATC decoding under ARM translation).
 
 ## If it fails: logcat
 
