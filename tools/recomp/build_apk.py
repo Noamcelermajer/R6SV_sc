@@ -22,6 +22,7 @@ import concurrent.futures
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -127,6 +128,25 @@ def run(cmd, **kw):
     return r
 
 
+def pack_data(folder, igli, pak):
+    """assets/gamedata.pak: "R6PK1", then per file u16 name length, name, u64 size, content; a zero length ends it.
+    data/3d.zip is left out (the runtime never reads it); igli.bin (the APK's res/raw) is added."""
+    files = sorted(p for p in folder.rglob("*") if p.is_file() and p.relative_to(folder).as_posix() != "data/3d.zip")
+    entries = [(p.relative_to(folder).as_posix(), p) for p in files]
+    if igli.is_file():
+        entries.append(("igli.bin", igli))
+    total = sum(p.stat().st_size for _, p in entries)
+    with open(pak, "wb") as f:
+        f.write(b"R6PK1\0\0\0")
+        for name, p in entries:
+            n = name.encode("utf-8")
+            f.write(struct.pack("<H", len(n)) + n + struct.pack("<Q", p.stat().st_size))
+            with open(p, "rb") as src:
+                shutil.copyfileobj(src, f, 1 << 20)
+        f.write(struct.pack("<H", 0))
+    print(f"{pak}: {len(entries)} files, {total} bytes of game data")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--so", type=Path, required=True, help="the original library (armeabi-v7a)")
@@ -134,6 +154,8 @@ def main():
     ap.add_argument("--checked", action="store_true", help="bounds checks and shadow call stack in the translated code")
     ap.add_argument("--no-translate", action="store_true", help="skip the lifter: packaging check, the APK cannot run")
     ap.add_argument("--no-cache", action="store_true", help="lift again even if the lifted C is cached")
+    ap.add_argument("--data", type=Path, help="the game's data folder (GloftR6HP): packed into the APK as "
+                    "assets/gamedata.pak, which the app unpacks on its first start")
     ap.add_argument("--install", action="store_true", help="adb install -r the APK afterwards")
     args = ap.parse_args()
     t0 = time.time()
@@ -219,12 +241,17 @@ def main():
     assets = out / "assets"
     assets.mkdir(exist_ok=True)
     shutil.copyfile(out / "image.bin", assets / "image.bin")
+    pak = assets / "gamedata.pak"
+    if args.data:
+        pack_data(args.data, Path(args.so).resolve().parents[2] / "res" / "raw" / "igli.bin", pak)
+    elif pak.exists():
+        pak.unlink()
     compiled = out / "res.zip"
     run([bt / f"aapt2{exe}", "compile", "--dir", out / "res", "-o", compiled])
     unsigned = out / "unsigned.apk"
     run([bt / f"aapt2{exe}", "link", "-o", unsigned, "-I", android_jar, "--manifest", out / "AndroidManifest.xml",
          "--min-sdk-version", MIN_SDK, "--target-sdk-version", TARGET_SDK, "--version-code", VERSION_CODE,
-         "--version-name", VERSION_NAME, "-A", assets, str(compiled)])
+         "--version-name", VERSION_NAME, "-0", "pak", "-A", assets, str(compiled)])
     with zipfile.ZipFile(unsigned, "a", zipfile.ZIP_DEFLATED) as z:
         z.write(lib, f"lib/arm64-v8a/lib{LIB_NAME}.so")
     aligned = out / "aligned.apk"
@@ -238,6 +265,8 @@ def main():
         run([jdk / "bin" / f"keytool{exe}", "-genkeypair", "-keystore", keystore, "-storepass", "android", "-keypass", "android",
              "-alias", KEY_ALIAS, "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000", "-dname", "CN=r6sv-recomp debug"], env=env)
     apk = out / (APK_NAME if runnable else APK_NAME.replace(".apk", "-norun.apk"))
+    if args.data:
+        apk = apk.with_name(apk.stem + "-full.apk")
     run([bt / f"apksigner{bat}", "sign", "--ks", keystore, "--ks-pass", "pass:android", "--key-pass", "pass:android",
          "--ks-key-alias", KEY_ALIAS, "--out", apk, aligned], env=env)
     run([bt / f"apksigner{bat}", "verify", apk], env=env)

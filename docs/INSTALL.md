@@ -9,6 +9,15 @@ it also runs into the training mission and takes touch input. Two things had sto
 ownership" below), and ART aborting in `AttachCurrentThread` (`thread.cc` "FindStackTop" check) because the system-bar
 JNI call ran on the game's switched stack; that call now runs on a helper thread.
 
+## The full APK (game data inside): the simple way
+
+`build/android/r6sv-recomp-full.apk` (725,574,234 bytes) carries the game data as `assets/gamedata.pak`. Install it and
+start it: on the first start it unpacks 4,165 files (677 MB) into `/sdcard/Android/data/com.r6sv.recomp/files`, which
+the app then owns, so nothing below about pushing data or folder ownership applies. The screen stays black while it
+unpacks (9 s on the emulator; logcat shows `unpack: N MB`). It needs about 1.5 GB free. Files that already exist with
+the right size are kept and saves are never overwritten. Tested by a clean install on the Android 14 emulator.
+Build it by adding `--data original/data/gameloft/games/GloftR6HP` to the build command.
+
 ## Folder ownership (read before pushing data)
 
 The app must own its data folder and everything in it. Folders created by `adb shell mkdir` or `adb push` belong to

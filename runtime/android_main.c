@@ -183,6 +183,65 @@ static void sensor_drain(void) {
         if (ev.type == ASENSOR_TYPE_ACCELEROMETER && booted && !paused) rt_game_accel(ev.acceleration.x, ev.acceleration.y, ev.acceleration.z);
 }
 
+/* ---- game data bundled in the APK ---------------------------------------------------------------------------- */
+/* assets/gamedata.pak (tools/recomp/build_apk.py --data): "R6PK1\0\0\0", then per file u16 name length, name,
+ * u64 size, content; a zero name length ends it. Unpacked into the data folder on the first start, so the app owns
+ * the files. `.unpacked` holds the pak's size and is written last: an interrupted unpack runs again. A file that
+ * already has the right size is kept, and files outside data/ (saves) are never overwritten. */
+static int pak_read(AAsset *a, void *buf, size_t n) {
+    char *p = buf;
+    while (n) {
+        int r = AAsset_read(a, p, n > (1u << 20) ? (1u << 20) : n);
+        if (r <= 0) return -1;
+        p += r; n -= (size_t)r;
+    }
+    return 0;
+}
+static void unpack_game_data(struct android_app *app, const char *data) {
+    AAsset *a = AAssetManager_open(app->activity->assetManager, "gamedata.pak", AASSET_MODE_STREAMING);
+    if (!a) return;
+    long long pak_size = AAsset_getLength64(a), have = -1;
+    char marker[600], path[1200], name[600];
+    snprintf(marker, sizeof marker, "%s/.unpacked", data);
+    FILE *m = fopen(marker, "r");
+    if (m) { if (fscanf(m, "%lld", &have) != 1) have = -1; fclose(m); }
+    if (have == pak_size) { AAsset_close(a); return; }
+    rt_log("unpacking the bundled game data (%lld bytes) to %s", pak_size, data);
+    char magic[8];
+    static char buf[1 << 20];
+    int files = 0, ok = !pak_read(a, magic, 8) && !memcmp(magic, "R6PK1", 5);
+    long long done = 0, next_log = 0;
+    while (ok) {
+        uint16_t nl;
+        uint64_t size;
+        if (pak_read(a, &nl, 2)) { ok = 0; break; }
+        if (!nl) break;
+        if (nl >= sizeof name || pak_read(a, name, nl) || pak_read(a, &size, 8)) { ok = 0; break; }
+        name[nl] = 0;
+        if (name[0] == '/' || strstr(name, "..")) { ok = 0; break; }
+        snprintf(path, sizeof path, "%s/%s", data, name);
+        for (char *s = path + strlen(data) + 1; (s = strchr(s, '/')); s++) { *s = 0; mkdir(path, 0770); *s = '/'; }
+        struct stat st;
+        int exists = !stat(path, &st);
+        int keep = exists && ((uint64_t)st.st_size == size || strncmp(name, "data/", 5));
+        FILE *f = keep ? NULL : fopen(path, "wb");
+        if (!keep && !f) { rt_log("unpack: cannot write %s: %s", path, strerror(errno)); ok = 0; break; }
+        for (uint64_t left = size; left;) {
+            size_t n = left > sizeof buf ? sizeof buf : (size_t)left;
+            if (pak_read(a, buf, n) || (f && fwrite(buf, 1, n, f) != n)) { ok = 0; break; }
+            left -= n;
+        }
+        if (f && fclose(f)) ok = 0;
+        files++;
+        done += (long long)size;
+        if (done >= next_log) { rt_log("unpack: %lld MB", done >> 20); next_log = done + (100ll << 20); }
+    }
+    AAsset_close(a);
+    if (!ok) { rt_log("unpacking the game data failed (storage full?): %s", strerror(errno)); return; }
+    if ((m = fopen(marker, "w"))) { fprintf(m, "%lld\n", pak_size); fclose(m); }
+    rt_log("unpacked %d files, %lld MB", files, done >> 20);
+}
+
 /* ---- boot --------------------------------------------------------------------------------------------------- */
 static void boot(struct android_app *app) {
     AAsset *a = AAssetManager_open(app->activity->assetManager, "image.bin", AASSET_MODE_BUFFER);
@@ -200,6 +259,7 @@ static void boot(struct android_app *app) {
     mkdir(home, 0770);
     mkdir(temp, 0770);
     rt_log("game data folder: %s", data);
+    unpack_game_data(app, data);
     struct stat st;
     char probe[600];
     snprintf(probe, sizeof probe, "%s/data/Res.array", data);
