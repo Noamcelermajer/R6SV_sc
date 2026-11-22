@@ -53,7 +53,7 @@ MANIFEST = f"""<?xml version="1.0" encoding="utf-8"?>
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
   <uses-permission android:name="android.permission.VIBRATE" />
-  <application android:label="{APP_LABEL}" android:hasCode="false" android:extractNativeLibs="true"
+  <application android:label="{APP_LABEL}"@ICON@ android:hasCode="false" android:extractNativeLibs="true"
       android:debuggable="true" android:allowBackup="false" android:isGame="true" android:appCategory="game"
       android:theme="@style/GameTheme">
     <activity android:name="android.app.NativeActivity" android:exported="true" android:launchMode="singleTask"
@@ -203,9 +203,18 @@ def main():
     print(f"{lib}: {lib.stat().st_size} bytes")
 
     # package: manifest + resources + assets/image.bin + lib/arm64-v8a/libr6sv.so, aligned and signed
-    (out / "AndroidManifest.xml").write_text(MANIFEST, encoding="utf-8")
     res = out / "res" / "values"
     res.mkdir(parents=True, exist_ok=True)
+    # the launcher icon is the original APK's own (res/drawable/icon.png next to the lib/ folder the .so came from)
+    icon = Path(args.so).resolve().parents[2] / "res" / "drawable" / "icon.png"
+    drawable = out / "res" / "drawable"
+    if icon.is_file():
+        drawable.mkdir(exist_ok=True)
+        shutil.copyfile(icon, drawable / "icon.png")
+    elif drawable.exists():
+        shutil.rmtree(drawable)
+    (out / "AndroidManifest.xml").write_text(
+        MANIFEST.replace("@ICON@", ' android:icon="@drawable/icon"' if icon.is_file() else ""), encoding="utf-8")
     (res / "styles.xml").write_text(STYLES, encoding="utf-8")
     assets = out / "assets"
     assets.mkdir(exist_ok=True)
